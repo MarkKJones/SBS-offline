@@ -33,7 +33,7 @@ SBSGenericDetector::SBSGenericDetector( const char* name, const char* descriptio
     THaApparatus* apparatus ) :
   THaNonTrackingDetector(name,description,apparatus), fNrows(0),fNcolsMax(0),
   fNlayers(0), fModeADC(SBSModeADC::kADCSimple), fModeTDC(SBSModeTDC::kNone),
-  fDisableRefADC(false),fDisableRefTDC(false),
+  fDisableRefADC(true),fDisableRefTDC(true),
   fConst(1.0), fSlope(0.0), fAccCharge(0.0), fStoreRawHits(false),
   fStoreEmptyElements(true)
 {
@@ -213,10 +213,13 @@ Int_t SBSGenericDetector::ReadDatabase( const TDatime& date )
 
   // Find out how many channels got skipped:
   int nskipped = 0;
+    int nreftdcchans = 0;
+    int nrefadcchans = 0;
   if( !chanmap.empty() ) {
     for(auto i : chanmap) {
-      if (i < 0)
-        nskipped++;
+      if (i == -1) nskipped++;
+      if (i == -1000) nreftdcchans++;
+      if (i == -2000) nrefadcchans++;
     }
   }
 
@@ -224,21 +227,13 @@ Int_t SBSGenericDetector::ReadDatabase( const TDatime& date )
   fChanMap.clear();
   Int_t detmap_flags = THaDetMap::kFillRefIndex; // Specify reference index/channel
   if(model_in_detmap) {
+    std::cout << " model in detmap = " << model_in_detmap << std::endl;
     detmap_flags |= THaDetMap::kFillModel;
   }
   if( FillDetMap(detmap, detmap_flags, here) <= 0 ) {
     err = kInitError;  // Error already printed by FillDetMap
   } else {
-    int nrefchans = 0;
-    // Find out how many channels in the detmap are reference channels
-    for( Int_t i = 0; i < GetDetMap()->GetSize(); i++) {
-      THaDetMap::Module *d = GetDetMap()->GetModule(i);
-      Int_t nchan = d->GetNchan();
-      if(d->refindex == -1) {
-        nrefchans += nchan;
-      }
-    }
-    nelem = fDetMap->GetTotNumChan() - nskipped - nrefchans; // Exclude skipped channels in count
+    nelem = fDetMap->GetTotNumChan() - nskipped - nreftdcchans - nrefadcchans; // Exclude skipped channels in count
 
     if( WithTDC() && WithADC() ) {
       if(nelem != 2*fNelem ) {
@@ -249,7 +244,7 @@ Int_t SBSGenericDetector::ReadDatabase( const TDatime& date )
       }
     } else if ( nelem != fNelem) {
       Error( Here(here), "Number of crate module channels (%d) "
-	     "inconsistent with number of blocks (%d) nskipped (%d) nrefchans (%d)", nelem, fNelem , nskipped,nrefchans);
+	     "inconsistent with number of blocks (%d) nskipped (%d) nreftdcchans (%d) nrefadcchans (%d)", nelem, fNelem , nskipped,nreftdcchans,nrefadcchans);
       err = kInitError;
     }
   }
@@ -261,13 +256,13 @@ Int_t SBSGenericDetector::ReadDatabase( const TDatime& date )
     // If a map is found in the database, ensure it has the correct size
     Int_t cmapsize = chanmap.size();
     if( WithTDC() && WithADC() ) {
-      if(cmapsize - nskipped != 2*fNelem ) {
+      if(cmapsize - nskipped- nreftdcchans- nrefadcchans != 2*fNelem ) {
         Error( Here(here), "Number of logical channel to detector block map (%d) "
             "inconsistent with 2 channels per block (%d, expected)", cmapsize,
             2*fNelem );
         err = kInitError;
       }
-    } else if ( cmapsize - nskipped != fNelem) {
+    } else if ( cmapsize - nskipped- nreftdcchans- nrefadcchans != fNelem) {
       Error( Here(here), "Number of logical channel to detector block map (%d) "
           "inconsistent with number of blocks (%d)", cmapsize, fNelem );
       err = kInitError;
@@ -281,12 +276,17 @@ Int_t SBSGenericDetector::ReadDatabase( const TDatime& date )
     // the numbering of the blocks starts on the top left corner when standing
     // behind the detector and facing the target. We turn this into a row
     // and column, layer as appropriate.
+    //
+    //
     Int_t nmodules = GetDetMap()->GetSize();
+    std::cout << " nmod = " << nmodules << std::endl;
     assert( nmodules > 0 );
     fChanMap.resize(nmodules);
+    fRefChanMap.resize(nmodules);
     Decoder::THaCrateMap *cratemap = SBSManager::GetInstance()->GetCrateMap();
-    Int_t ka = 0, kt = 0, km = 0, k = 0;
+    Int_t kr = 0,ka = 0, kt = 0, km = 0, k = 0;
     for( Int_t i = 0; i < nmodules && !err; i++) {
+      Int_t krmod = 0;
       THaDetMap::Module *d = GetDetMap()->GetModule(i);
       // If the model number was not listed in the detmap section, fill it
       // in from the crate map
@@ -302,71 +302,46 @@ Int_t SBSGenericDetector::ReadDatabase( const TDatime& date )
       Int_t nchan = d->GetNchan();
       // If this module has the reference channels, just create instances
       // of reference elements that will contain their data.
-      if( d->refindex == -1) {
-        for(Int_t chan = 0; chan < nchan; chan++) {
-	  fChanMap[i].resize(nchan);
-          SBSElement *el = MakeElement(0,0,0,0,0,0,-1);
-          if(d->IsADC()) {
-            el->SetADC(0.,1.);
-          } else {
-            el->SetTDC(0.,1.);
-          }
-          fRefElements.push_back(el);
-        }
-      } else if ( nchan > 0 ) {
+      if ( nchan > 0 ) {
         fChanMap[i].resize(nchan);
         for(Int_t chan = 0; chan < nchan && !err; chan++,k++) {
           if(!chanmap.empty() ) {
             // Skip disabled channels
-            if(chanmap[k]<0) {
+            if(chanmap[k]==-1) {
               fChanMap[i][chan] = -1;
               continue;
             }
+	    if(chanmap[k]==-1000 || chanmap[k]==-2000) {
+              SBSElement *el = MakeElement(0,0,0,0,0,0,-1);
+              if(d->IsADC()) {
+                el->SetADC(0.,1.);
+		fDisableRefADC = kFALSE;
+              } else {
+               el->SetTDC(0.,.1);
+		fDisableRefTDC = kFALSE;
+              }
+              fChanMap[i][chan] = chanmap[k];
+              fRefElements.push_back(el);
+    	      fRefChanMap[i].push_back(kr);
+  	      if ( krmod==0) fRefChanLo.push_back(chan);
+  	      if ( krmod>=0) fRefChanHi.push_back(chan);
+              kr++;
+	      krmod++;
+	    } else {
             km = chanmap[k] - fChanMapStart;
+	    }
           } else {
             km = d->IsADC() ? ka : kt;
           }
           // Count ADC and TDC channels separately
           if(d->IsADC()) {
-            // Check the reference channel (if any) is valid
-            if(!fDisableRefADC && d->refindex >=0 ) {
-              // Make sure that if a reference channel/index was specified, there
-              // have already been sufficient number of reference blocks created
-              if(d->refindex >= int(fRefElements.size())) {
-                Error( Here(here), "Cannot find reference module with index %d.",
-                    d->refindex);
-                err = kInitError;
-                continue;
-              } else if ( !fRefElements[d->refindex]->ADC() ) {
-                Error( Here(here), "Error reference index %d is not an ADC!",
-                    d->refindex);
-                err = kInitError;
-                continue;
-              }
-            }
-            ka++;
+            if(chanmap[k]!=-1000) ka++;
           } else {
-            // Check the reference channel (if any) is valid
-            if(!fDisableRefTDC && d->refindex >=0 ) {
-              // Make sure that if a reference channel/index was specified, there
-              // have already been sufficient number of reference blocks created
-              if(d->refindex >= int(fRefElements.size())) {
-                Error( Here(here), "Cannot find reference module with index %d.",
-                    d->refindex);
-                err = kInitError;
-                continue;
-              } else if ( !fRefElements[d->refindex]->TDC() ) {
-                Error( Here(here), "Error reference index %d is not an TDC!",
-                    d->refindex);
-                err = kInitError;
-                continue;
-              }
-            }
-            kt++;
+            if(chanmap[k]!=-1000) kt++;
           }
           assert( km < fNelem );
           assert( km >= 0);
-          fChanMap[i][chan] = km;
+          if(chanmap[k]!=-1000) fChanMap[i][chan] = km;
         }
       } else {
         Error( Here(here), "No channels defined for module %d.", i);
@@ -635,6 +610,7 @@ Int_t SBSGenericDetector::DefineVariables( EMode mode )
   // This includes things like fE, fNblk, fE_c, etc...
   RVarDef vars[] = {
     { "nhits", "Nhits",  "fNhits" },
+    { "nrefhits", "Number of reference time hits",  "fNRefhits" },
     { "ngoodhits", "NGoodhits",  "fNGoodhits" },
     { "row", "Row for block in data vectors",  "fGood.row" },
     { "col", "Col for block in data vectors",  "fGood.col" },
@@ -675,7 +651,7 @@ Int_t SBSGenericDetector::DefineVariables( EMode mode )
       ve.push_back({"tdc_te","Calibrated TDC trailing info","fGood.t_te"});
       ve.push_back({"tdc_tot","Time Over Threshold","fGood.t_ToT"});
     }
-
+    std::cout << " fstorerawhits = " << fStoreRawHits<< std::endl;
     if(fStoreRawHits) {
       ve.push_back({ "hits.t",   "All TDC leading edge times",  "fRaw.t" });
       if(fModeTDC != SBSModeTDC::kTDCSimple) {
@@ -706,18 +682,33 @@ Int_t SBSGenericDetector::Decode( const THaEvData& evdata )
   // Clear last event
   ClearEvent();
   //static const char* const here = "Decode()";
-
+  // Loop over modules for the reference time
   SBSElement *blk = 0;
-  // Loop over all modules in the calorimeter and decode accordingly
   for( UShort_t imod = 0; imod < fDetMap->GetSize(); imod++ ) {
     THaDetMap::Module *d = fDetMap->GetModule( imod );
-
+    if (d->refindex == -1 ) continue;
     for(Int_t ihit = 0; ihit < evdata.GetNumChan( d->crate, d->slot ); ihit++) {
- 
+      Int_t chan = evdata.GetNextChan( d->crate, d->slot, ihit );
+      if( chan > fRefChanHi[imod] || chan < fRefChanLo[imod]||  fChanMap[imod][chan - d->lo] >= -1) continue;
+	blk = fRefElements[ fNRefhits++ ];
+         if(d->IsADC()) {
+                continue ;
+         } else if ( d->IsTDC()) {
+	    DecodeRefTDC(evdata,blk,d,chan);
+         }
+    }
+  }
+
+
+  // Loop over all modules decode accordingly
+  blk = 0;
+  for( UShort_t imod = 0; imod < fDetMap->GetSize(); imod++ ) {
+    THaDetMap::Module *d = fDetMap->GetModule( imod );
+	for(Int_t ihit = 0; ihit < evdata.GetNumChan( d->crate, d->slot ); ihit++) {
       // Get the next available channel, skipping the ones that do not belong
       // to our detector
       Int_t chan = evdata.GetNextChan( d->crate, d->slot, ihit );
-      if( chan > d->hi || chan < d->lo || fChanMap[imod][chan - d->lo] == -1)
+      if( chan > d->hi || chan < d->lo || fChanMap[imod][chan - d->lo] == -1 || fChanMap[imod][chan - d->lo] == -1000|| fChanMap[imod][chan - d->lo] == -2000)
         continue;
        fNhits++;
 
@@ -732,7 +723,7 @@ Int_t SBSGenericDetector::Decode( const THaEvData& evdata )
   }
 
   return fNhits;
-}
+  }
 
 Int_t SBSGenericDetector::DecodeADC( const THaEvData& evdata,
     SBSElement *blk, THaDetMap::Module *d, Int_t chan)
@@ -779,21 +770,73 @@ Int_t SBSGenericDetector::DecodeADC( const THaEvData& evdata,
   return nhit;
 }
 
+Int_t SBSGenericDetector::DecodeRefTDC( const THaEvData& evdata,
+    SBSElement *blk, THaDetMap::Module *d, Int_t chan)
+{
+  // if(!WithTDC() || !blk->TDC())
+  //  return 0;
+  //
+  
+  Int_t nhit = evdata.GetNumHits(d->crate, d->slot, chan);
+  //  std::cout << " decode reftdc nhits = " << nhit << " chan = " << chan << std::endl;
+ Int_t edge = 0;
+  for(Int_t ihit = 0; ihit < nhit; ihit++) {
+    //    std::cout << " loop hit = " << ihit << " crate = " << d->crate << "  " << d->slot << "  " << chan << "  " <<ihit<< std::endl;
+    edge = 0; // Default is to not have any trailing info
+    if(fModeTDC != SBSModeTDC::kTDCSimple) { // trailing edge info stored on raw data variable
+      
+      edge = evdata.GetRawData(d->crate, d->slot, chan, ihit);
+      //      std::cout << " get edge = " << edge << std::endl;
+    }
+    if (edge ==1 && ihit ==0) continue; // skip first hit if trailing edge
+    if (blk->TDC()->HasData() && fModeTDC != SBSModeTDC::kTDCSimple && edge ==0 && ihit == nhit-1)  continue; // skip last hit if leading edge
+    Float_t val= evdata.GetData(d->crate, d->slot, chan, ihit);
+    //   std::cout << " get data " << evdata.GetData(d->crate, d->slot, chan, ihit) << " val = " << val<< " edge = " << edge <<  std::endl;
+    blk->TDC()->Process(val , edge);
+  }
+  if (!blk->TDC()->HasData()) {
+       if (nhit==1)  {	 
+          Float_t val= evdata.GetData(d->crate, d->slot, chan, 0);
+	  blk->TDC()->Process(val , edge);
+	  std::cout << "Only one hit in reference time but not LE ref index = "  << d->refindex << " nhits = " << nhit  << " val = " << val << " event num = " << evdata.GetEvNum() << std::endl;
+       } else if (nhit==2) {
+          Float_t val= evdata.GetData(d->crate, d->slot, chan, 0);
+	  blk->TDC()->Process(val , edge);
+	  std::cout << "Only two hits in reference time but not LE ref index = "  << d->refindex << " nhits = " << nhit  << " val = " << val << " event num = " << evdata.GetEvNum()<< std::endl;	 
+       } else {
+          Float_t val= evdata.GetData(d->crate, d->slot, chan, 0);
+	  blk->TDC()->Process(val , edge);
+       std::cout << "More than two hits in reference time but not LE ref index = "  << d->refindex << " nhits = " << nhit  << " val = " << val << " event num = " << evdata.GetEvNum()<< std::endl;
+       }	 
+
+       }
+
+  return nhit;
+
+}
+
 Int_t SBSGenericDetector::DecodeTDC( const THaEvData& evdata,
     SBSElement *blk, THaDetMap::Module *d, Int_t chan)
 {
   if(!WithTDC() || !blk->TDC())
     return 0;
-
+  //
   Int_t nhit = evdata.GetNumHits(d->crate, d->slot, chan);
   Float_t refval  = 0;
   if(!fDisableRefTDC && d->refindex>=0) {
-    if(!fRefElements[d->refindex]->TDC()->HasData()) {
-      std::cout << "Error reference TDC channel has no hits!" << std::endl;
+     SBSElement *refblk = fRefElements[d->refindex];
+    if(!refblk->TDC()->HasData()) {
+      //      std::cout << "Error reference TDC channel has no hits! refindex = " << d->refindex << " num ref tot = " << fNRefhits << " size = " << fRefElements.size() << std::endl;
     } else {
-      // TODO: What should we do if reference channel has multiple hits?
-      // For now, just take the first one
-      refval = fRefElements[d->refindex]->TDC()->GetDataRaw(0);
+       Int_t nhits = refblk->TDC()->GetNHits(); 
+       Float_t MinDiff = 10000.;
+       Int_t HitIndex = 0;
+       Float_t RefCent = 0.;
+       for (Int_t ih=0;ih<nhits;ih++) {
+	 if (abs(refblk->TDC()->GetDataRaw(ih)-RefCent) < MinDiff) HitIndex = ih;
+       }      
+      refval = refblk->TDC()->GetDataRaw(HitIndex);
+      //      std::cout << " ref val = " << refval << " ref index = " << d->refindex << " num ref tot = " << fNRefhits<< std::endl;
     }
   }
 
@@ -803,9 +846,27 @@ Int_t SBSGenericDetector::DecodeTDC( const THaEvData& evdata,
     if(fModeTDC != SBSModeTDC::kTDCSimple) { // trailing edge info stored on raw data variable
       edge = evdata.GetRawData(d->crate, d->slot, chan, ihit);
     }
+    if (edge ==1 && ihit ==0) continue; // skip first hit if trailing edge
+    if (fModeTDC != SBSModeTDC::kTDCSimple && edge ==0 && ihit == nhit-1)  continue; // skip last hit if leading edge
     blk->TDC()->Process(
         evdata.GetData(d->crate, d->slot, chan, ihit) - refval, edge);
   }
+  if (!blk->TDC()->HasData()) {
+       if (nhit==1)  {	 
+          Float_t val= evdata.GetData(d->crate, d->slot, chan, 0);
+	  blk->TDC()->Process(val - refval , edge);
+	  std::cout << "Only one hit in time but not LE ref index = "  << d->refindex << " nhits = " << nhit  << " val = " << val << " event num = " << evdata.GetEvNum() << std::endl;
+       } else if (nhit==2) {
+          Float_t val= evdata.GetData(d->crate, d->slot, chan, 0);
+	  blk->TDC()->Process(val - refval , edge);
+	  std::cout << "Only two hits in time but not LE ref index = "  << d->refindex << " nhits = " << nhit  << " val = " << val << " event num = " << evdata.GetEvNum()<< std::endl;	 
+       } else {
+          Float_t val= evdata.GetData(d->crate, d->slot, chan, 0);
+	  blk->TDC()->Process(val - refval , edge);
+       std::cout << "More than two hits in time but not LE ref index = "  << d->refindex << " nhits = " << nhit  << " val = " << val << " event num = " << evdata.GetEvNum()<< std::endl;
+       }	 
+
+       }
 
   return nhit;
 }
@@ -816,11 +877,15 @@ void SBSGenericDetector::ClearEvent()
   // Call our version in case sub-classes have re-implemented it
   SBSGenericDetector::ClearOutputVariables();
   fNhits = 0;
+  fNRefhits = 0;
   fNGoodhits = 0;
   fCoarseProcessed = 0;
   fFineProcessed = 0;
   for(size_t k = 0; k < fElements.size(); k++) {
     fElements[k]->ClearEvent();
+  }
+  for(size_t k = 0; k < fRefElements.size(); k++) {
+    fRefElements[k]->ClearEvent();
   }
 }
 
@@ -830,11 +895,15 @@ void SBSGenericDetector::Clear(Option_t* opt)
   // Call our version in case sub-classes have re-implemented it
   SBSGenericDetector::ClearOutputVariables();
   fNhits = 0;
+  fNRefhits = 0;
   fNGoodhits = 0;
   fCoarseProcessed = 0;
   fFineProcessed = 0;
   for(size_t k = 0; k < fElements.size(); k++) {
     fElements[k]->ClearEvent();
+  }
+  for(size_t k = 0; k < fRefElements.size(); k++) {
+    fRefElements[k]->ClearEvent();
   }
 }
 
@@ -875,10 +944,10 @@ Int_t SBSGenericDetector::CoarseProcess(TClonesArray& )// tracks)
           fGood.t_ToT.push_back(hit.ToT.val);
         }
       } else if ( fStoreEmptyElements ) {
-        fGood.t.push_back(0.0);
+        fGood.t.push_back(kBig);
         if(fModeTDC == SBSModeTDC::kTDC) {
-          fGood.t_te.push_back(0.0);
-          fGood.t_ToT.push_back(0.0);
+          fGood.t_te.push_back(kBig);
+          fGood.t_ToT.push_back(kBig);
         }
       }
     }
