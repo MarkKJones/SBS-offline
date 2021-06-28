@@ -76,9 +76,14 @@ void SBSTimingHodoscope::ClearEvent()
 /*
  * FindGoodHit()
  */
-Int_t SBSTimingHodoscope::FindGoodHit(SBSElement *)
+Int_t SBSTimingHodoscope::FindGoodHit(SBSElement *blk)
 {
-   return 0;
+  Int_t GoodHit=0;  
+  if (blk->TDC()&& blk->HasData()) {
+    blk->TDC()->SetGoodHit(0);
+    GoodHit=1;
+  }
+  return GoodHit;
 }
 
 Int_t SBSTimingHodoscope::CoarseProcess( TClonesArray& tracks )
